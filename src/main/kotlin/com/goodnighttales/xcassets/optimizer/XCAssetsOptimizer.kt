@@ -26,6 +26,11 @@ class XCAssetsOptimizer(val inputs: List<File>, val output: File, val crush: Boo
     var totalPreCrush = 0L
     var totalPostCrush = 0L
 
+    val xcAssetExtensions = setOf(
+            "imageset",
+            "appiconset"
+    )
+
     operator fun invoke() {
         tempFile.deleteOnExit()
         val sourceFiles = mutableMapOf<String, File>()
@@ -36,7 +41,9 @@ class XCAssetsOptimizer(val inputs: List<File>, val output: File, val crush: Boo
                 sourceFiles.putAll(filesInDirectoryByName(input) { it.isFile && it.extension == "png" })
         }
 
-        val assets = filesInDirectoryByName(output) { it.isDirectory && it.extension == "imageset" }
+        val assets = filesInDirectoryByName(output) {
+            it.isDirectory && it.extension in xcAssetExtensions
+        }
 
         assets.forEach {
             val source = sourceFiles[it.key] ?: return@forEach
