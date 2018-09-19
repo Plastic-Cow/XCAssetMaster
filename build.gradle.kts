@@ -7,7 +7,7 @@ plugins {
     application
 }
 
-group = "com.goodnighttales.xcassets"
+group = "com.goodnighttales.xcassetmaster"
 version = "0.1"
 
 repositories {
@@ -24,7 +24,7 @@ dependencies {
 }
 
 application {
-    mainClassName = "com.goodnighttales.xcassets.XCAssetsMainKt"
+    mainClassName = "com.goodnighttales.xcassetmaster.XCAssetMasterKt"
     applicationDefaultJvmArgs = listOf(
             "-Djava.awt.headless=true"
     )
@@ -33,8 +33,8 @@ application {
 val fatJar = task("fatJar", type = Jar::class) {
     baseName="${project.name}-fat"
     manifest {
-        attributes["Main-Class"] = "com.goodnighttales.xcassets.XCAssetsMainKt"
-        attributes["Implementation-Title"] = "XCAssets"
+        attributes["Main-Class"] = "com.goodnighttales.xcassetmaster.XCAssetMasterKt"
+        attributes["Implementation-Title"] = "XCAssetMaster"
         attributes["Implementation-Version"] = version
     }
     from(configurations.runtime.map { if(it.isDirectory) it else zipTree(it) })

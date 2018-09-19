@@ -1,8 +1,15 @@
-package com.goodnighttales.xcassets.optimizer
+package com.goodnighttales.xcassetmaster
 
-import com.goodnighttales.xcassets.util.Timer
-import com.goodnighttales.xcassets.util.not
-import com.goodnighttales.xcassets.util.toReadableFileSize
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.arguments.multiple
+import com.github.ajalt.clikt.parameters.arguments.validate
+import com.github.ajalt.clikt.parameters.options.flag
+import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.types.file
+import com.goodnighttales.xcassetmaster.util.Timer
+import com.goodnighttales.xcassetmaster.util.not
+import com.goodnighttales.xcassetmaster.util.toReadableFileSize
 import com.googlecode.pngtastic.core.PngImage
 import com.googlecode.pngtastic.core.PngOptimizer
 import java.awt.Dimension
@@ -10,15 +17,12 @@ import java.awt.Image
 import java.awt.image.BufferedImage
 import java.io.*
 import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
 import java.util.stream.Collectors
 import javax.imageio.ImageIO
-import javax.imageio.ImageReader
-import kotlin.concurrent.thread
-import kotlin.math.absoluteValue
 
-class XCAssetsOptimizer(val inputs: List<File>, val output: File, val crush: Boolean, val force: Boolean) {
+fun main(args: Array<String>) = XCAssetMaster().main(args)
+
+class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
     val tempFile = File("xcassetsTmp.png")
     val updates = mutableMapOf<File, MutableList<File>>()
     var totalAssets = 0
@@ -31,7 +35,16 @@ class XCAssetsOptimizer(val inputs: List<File>, val output: File, val crush: Boo
             "appiconset"
     )
 
-    operator fun invoke() {
+    val output: File by argument("output", "The output .xcassetmaster directory")
+            .file(exists = true, fileOkay = false, folderOkay = true, writable = true, readable = true)
+            .validate { require(it.extension == "xcassetmaster") { "invalid extension ${it.extension}, expecting xcassets"} }
+    val inputs: List<File> by argument("inputs", "The input images and directories")
+            .file(exists = true, fileOkay = true, folderOkay = true, readable = true)
+            .multiple()
+    val crush: Boolean by option("-c", "--crush", help = "Enable PNGCrush").flag("--no-crush", default = true)
+    val force: Boolean by option("-f", "--force", help = "Don't check file modification dates").flag("--no-force", default = false)
+
+    override fun run() {
         tempFile.deleteOnExit()
         val sourceFiles = mutableMapOf<String, File>()
         inputs.forEach { input ->

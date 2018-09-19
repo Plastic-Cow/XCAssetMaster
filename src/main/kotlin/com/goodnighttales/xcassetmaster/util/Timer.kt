@@ -1,4 +1,4 @@
-package com.goodnighttales.xcassets.util
+package com.goodnighttales.xcassetmaster.util
 
 import java.time.Duration
 

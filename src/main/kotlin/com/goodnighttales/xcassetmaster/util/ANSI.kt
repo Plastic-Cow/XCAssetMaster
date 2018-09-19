@@ -1,4 +1,4 @@
-package com.goodnighttales.xcassets.util
+package com.goodnighttales.xcassetmaster.util
 
 operator fun String.not(): String {
     return "\u001B[" + this
