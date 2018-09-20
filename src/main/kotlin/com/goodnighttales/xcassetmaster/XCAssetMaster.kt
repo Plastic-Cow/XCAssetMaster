@@ -37,7 +37,7 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
 
     val output: File by argument("output", "The output .xcassetmaster directory")
             .file(exists = true, fileOkay = false, folderOkay = true, writable = true, readable = true)
-            .validate { require(it.extension == "xcassetmaster") { "invalid extension ${it.extension}, expecting xcassets"} }
+            .validate { require(it.extension == "xcassets") { "invalid extension ${it.extension}, expecting xcassets"} }
     val inputs: List<File> by argument("inputs", "The input images and directories")
             .file(exists = true, fileOkay = true, folderOkay = true, readable = true)
             .multiple()
@@ -63,8 +63,12 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
             queueImageSetUpdates(it.value, source)
         }
 
+        val updateCount = updates.values.sumBy { it.size }
         println("Compared $totalAssets assets against ${sourceFiles.size} master images")
-        println("Found ${updates.values.sumBy { it.size }} out-of-date images")
+        println("Found $updateCount out-of-date images")
+        if(updateCount == 0) {
+            return
+        }
 
         val timer = Timer()
         updates.forEach {
@@ -133,6 +137,7 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
             } else {
                 ""
             }
+            dest.setLastModified(source.lastModified())
             println("$prefix - Completed in ${!"33;1m"}${individualTime.stop()}${!"m"}$crushString")
         }
 
