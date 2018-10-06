@@ -5,6 +5,7 @@ import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.arguments.validate
 import com.github.ajalt.clikt.parameters.options.flag
+import com.github.ajalt.clikt.parameters.options.multiple
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.file
 import com.goodnighttales.xcassetmaster.util.Timer
@@ -22,20 +23,34 @@ import javax.imageio.ImageIO
 
 fun main(args: Array<String>) = XCAssetMaster().main(args)
 
-class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
-    val tempFile = File("xcassetsTmp.png")
+class XCAssetMaster : CliktCommand(
+        name = "xcassetmaster",
+        help = """
+            Automatically updates images in an Xcode Asset Catalog based on a directory of masters.
+            In essence this script simply substitutes rescaled master pixel data into existing PNG files.
+
+            This script goes through every asset in the passed Asset Catalog that has one of the whitelisted extensions
+            (.imageset and .appiconset by default) and searches the passed input directories/files for an identically
+            named .png file to use as a master. Once it finds an asset's master file it rescales the master to match
+            each png file in the asset and replaces them in-place. This process is optimized by copying the modification
+            date of the master onto the rescaled images and only updating images whose modification dates don't match
+            their masters'.
+
+        """.trimIndent()
+) {
+    val tempFile = File.createTempFile("XCAssetMaster-", ".png")
     val updates = mutableMapOf<File, MutableList<File>>()
     var totalAssets = 0
     var inputSize = 0L
     var totalPreCrush = 0L
     var totalPostCrush = 0L
 
-    val xcAssetExtensions = setOf(
+    val xcAssetExtensions = mutableSetOf(
             "imageset",
             "appiconset"
     )
 
-    val output: File by argument("output", "The output .xcassetmaster directory")
+    val output: File by argument("output", "The output .xcasset directory")
             .file(exists = true, fileOkay = false, folderOkay = true, writable = true, readable = true)
             .validate { require(it.extension == "xcassets") { "invalid extension ${it.extension}, expecting xcassets"} }
     val inputs: List<File> by argument("inputs", "The input images and directories")
@@ -43,15 +58,23 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
             .multiple()
     val crush: Boolean by option("-c", "--crush", help = "Enable PNGCrush").flag("--no-crush", default = true)
     val force: Boolean by option("-f", "--force", help = "Don't check file modification dates").flag("--no-force", default = false)
+    val exclude: List<String> by option("-x", "--exclude", help = "Exclude masters with this in their path").multiple()
+    val additionalAssetExtensions: List<String> by option("--asset-extension", help = "Whitelist more asset extensions (default whitelist is 'imageset' and 'appiconset')").multiple()
 
     override fun run() {
         tempFile.deleteOnExit()
-        val sourceFiles = mutableMapOf<String, File>()
+        xcAssetExtensions.addAll(additionalAssetExtensions)
+        var sourceFiles = mutableMapOf<String, File>()
         inputs.forEach { input ->
             if (input.isFile)
                 sourceFiles[input.nameWithoutExtension] = input
             else if (input.isDirectory)
                 sourceFiles.putAll(filesInDirectoryByName(input) { it.isFile && it.extension == "png" })
+        }
+        val exclude = this.exclude.toSet()
+        sourceFiles.filterValues { it.toPath().asSequence().none { it.toString() in exclude } }.let {
+            sourceFiles.clear()
+            sourceFiles.putAll(it)
         }
 
         val assets = filesInDirectoryByName(output) {
@@ -62,6 +85,8 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
             val source = sourceFiles[it.key] ?: return@forEach
             queueImageSetUpdates(it.value, source)
         }
+
+        val unusedMasters = sourceFiles.filterKeys { it !in assets }
 
         val updateCount = updates.values.sumBy { it.size }
         println("Compared $totalAssets assets against ${sourceFiles.size} master images")
@@ -74,6 +99,13 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
         updates.forEach {
             updateImages(it.key, it.value)
         }
+        if(unusedMasters.isNotEmpty()) {
+            println("\r${!"2K"}  ${!"33;1m"}! Unused masters:${!"m"}")
+
+            unusedMasters.forEach { file ->
+                println("\r${!"2K"}  ${!"33;1m"}! - ${file.value}${!"m"}")
+            }
+        }
         println("${!"33m"}Time: ${!"33;1m"}${timer.stop()}")
 
         if(crush) {
@@ -81,6 +113,8 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
             val crushSavings = String.format("%.1f", crushSavingFraction * 100)
             println("${!"32m"}Crushed by $crushSavings% (saving ${(totalPreCrush-totalPostCrush).toReadableFileSize()})")
         }
+
+        System.exit(0) // program hangs at the end without this. All the threads are just some form of "finalizer"
     }
 
     private fun queueImageSetUpdates(target: File, source: File) {
@@ -88,8 +122,8 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
         totalAssets += contents.size
 
         contents.forEach {
-            val dateDifference = it.lastModified() - source.lastModified()
-            if(force || dateDifference < MOD_DATE_TOLERANCE) {
+            val dateDifference = Math.abs(it.lastModified() - source.lastModified())
+            if(force || dateDifference > MOD_DATE_TOLERANCE) {
                 updates.getOrPut(source) { mutableListOf() }.add(it)
             }
         }
@@ -153,6 +187,15 @@ class XCAssetMaster : CliktCommand(name = "xcassetmaster") {
                 files.forEach { file ->
                     println("\r${!"2K"}  ${!"31;1m"}!   - Path: ${!"31m"}${file.relativeTo(this.output)}${!"m"}")
                 }
+            }
+        }
+
+        val unscaled = previousDimensions[Dimension(master.width, master.height)]
+        if(unscaled != null) {
+            println("\r${!"2K"}  ${!"33;1m"}! Master-resolution assets in bundle:${!"m"}")
+
+            unscaled.forEach { file ->
+                println("\r${!"2K"}  ${!"33;1m"}! - ${file.name}${!"m"}")
             }
         }
     }
