@@ -12,18 +12,13 @@ import com.github.ajalt.clikt.parameters.types.int
 import com.goodnighttales.xcassetmaster.util.Timer
 import com.goodnighttales.xcassetmaster.util.not
 import com.goodnighttales.xcassetmaster.util.toReadableFileSize
-import com.googlecode.pngtastic.core.PngImage
-import com.googlecode.pngtastic.core.PngOptimizer
 import java.awt.Color
 import java.awt.Dimension
-import java.awt.Image
 import java.awt.image.BufferedImage
 import java.io.*
 import java.nio.file.Files
 import java.util.stream.Collectors
 import javax.imageio.ImageIO
-import java.awt.Graphics2D
-
 
 
 fun main(args: Array<String>) = MainCommand.main(args)
@@ -69,8 +64,11 @@ object XCAssetMaster : CliktCommand(
     val inputs: List<File> by argument("inputs", "The input images and directories")
             .file(exists = true, fileOkay = true, folderOkay = true, readable = true)
             .multiple()
+    val dry: Boolean by option("--dry", help = "Do a dry run, only printing warnings").flag("--no-dry", default = false)
     val crush: Boolean by option("-c", "--crush", help = "Enable PNGCrush").flag("--no-crush", default = true)
     val force: Boolean by option("-f", "--force", help = "Don't check file modification dates").flag("--no-force", default = false)
+    val crop: Boolean by option("--crop", help = "Crop output images if the aspect ratio is mismatched. " +
+            "(A square master and short and wide output will crop the top and bottom evenly)").flag("--no-crop", default = false)
     val exclude: List<String> by option("-x", "--exclude", help = "Exclude masters with this in their path").multiple()
     val additionalAssetExtensions: List<String> by option("--asset-extension", help = "Whitelist more asset extensions (default whitelist is 'imageset' and 'appiconset')").multiple()
 
@@ -87,6 +85,10 @@ object XCAssetMaster : CliktCommand(
             }
         }
 
+        if(!dry) {
+            printWarnings(masters.values.toList(), assets)
+        }
+
         if(force) {
             assets.forEach { it.forceNeedsUpdate() }
         } else {
@@ -97,22 +99,24 @@ object XCAssetMaster : CliktCommand(
         println("Compared ${assets.sumBy { it.images.size }} assets against ${masters.size} master images")
         println("Found $updateCount out-of-date images")
 
-        if(updateCount != 0) {
-            val timer = Timer()
+        if(!dry) {
+            if (updateCount != 0) {
+                val timer = Timer()
 
-            masters.values.forEach {
-                it.updateAssets(crush)
-                it.updateModificationDates()
-            }
+                masters.values.forEach {
+                    it.updateAssets(crush, crop)
+                    it.updateModificationDates()
+                }
 
-            println("${!"33m"}Time: ${!"33;1m"}${timer.stop()}")
+                println("${!"33m"}Time: ${!"33;1m"}${timer.stop()}")
 
-            if (crush) {
-                val preCrush = assets.fold(0L) { t, it -> t + it.images.fold(0L) { t, it -> t + it.preCrush } } + 1L
-                val postCrush = assets.fold(0L) { t, it -> t + it.images.fold(0L) { t, it -> t + it.postCrush } } + 1L
-                val crushSavingFraction = (preCrush - postCrush) / preCrush.toDouble()
-                val crushSavings = String.format("%.1f", crushSavingFraction * 100)
-                println("${!"32m"}Crushed by $crushSavings% (saving ${(preCrush - postCrush).toReadableFileSize()})")
+                if (crush) {
+                    val preCrush = assets.fold(0L) { t, it -> t + it.images.fold(0L) { t, it -> t + it.preCrush } } + 1L
+                    val postCrush = assets.fold(0L) { t, it -> t + it.images.fold(0L) { t, it -> t + it.postCrush } } + 1L
+                    val crushSavingFraction = (preCrush - postCrush) / preCrush.toDouble()
+                    val crushSavings = String.format("%.1f", crushSavingFraction * 100)
+                    println("${!"32m"}Crushed by $crushSavings% (saving ${(preCrush - postCrush).toReadableFileSize()})")
+                }
             }
         }
 
@@ -154,37 +158,65 @@ object XCAssetMaster : CliktCommand(
     class Warnings(
             val master: MasterAsset,
             val duplicates: Map<Dimension, List<XCAsset.Image>>,
+            val upscaled: List<XCAsset.Image>,
+            val aspect: List<XCAsset.Image>,
             val unscaled: List<XCAsset.Image>
     ) {
         fun printWarnings() {
                 printMasterHeader()
             if(duplicates.isNotEmpty()) printDuplicateWarnings()
+            if(aspect.isNotEmpty()) printAspectWarnings()
+            if(upscaled.isNotEmpty()) printUpscaledWarnings()
             if(unscaled.isNotEmpty()) printUnscaledWarnings()
         }
 
         private fun printMasterHeader() {
-            println("\r${!"2K"}${!"33;1m"}! ${master.relativeFile}:${!"m"}")
+            println("\r${!"2K"}${!"31;1m"}${master.relativeFile}${!"m"}")
         }
 
         private fun printDuplicateWarnings() {
-            println("\r${!"2K"}${!"33;1m"}! - Duplicate resolutions:${!"m"}")
+            println("\r${!"2K"}${!"33;1m"} - Duplicate resolutions:${!"m"}")
 
             duplicates.forEach { (res, images) ->
-                println("\r${!"2K"}${!"33;1m"}!   - ${!"m"}${res.width}⨉${res.height}${!"m"}")
+                println("\r${!"2K"}${!"33;1m"}   - ${!"34;1m"}${res.width}${!"m"}⨉${!"34;1m"}${res.height}${!"m"}")
 
                 images.forEach { image ->
-                    println("\r${!"2K"}${!"33;1m"}!     - ${!"m"}${image.relativeFile}${!"m"}")
+                    println("\r${!"2K"}${!"33;1m"}     - ${!"m"}${image.relativeFile}${!"m"}")
                 }
+            }
+        }
+
+        private fun printAspectWarnings() {
+            println("\r${!"2K"}${!"33;1m"} - Mismatched aspect ratio:${!"m"}")
+
+            upscaled.forEach { image ->
+                val aspect = image.aspectFillDimensions
+                if(image.dimensions.width != image.aspectFillDimensions.width) {
+                    println("\r${!"2K"}${!"33;1m"}   - ${!"m"}${image.relativeFile}: width: ${!"34;1m"}${image.dimensions.width} " +
+                            "${!"m"}vs. ${!"34;1m"}${aspect.width}${!"m"}(master)")
+                } else if(image.dimensions.height != image.aspectFillDimensions.height) {
+                    println("\r${!"2K"}${!"33;1m"}   - ${!"m"}${image.relativeFile}: height: ${!"34;1m"}${image.dimensions.height} " +
+                            "${!"m"}vs. ${!"34;1m"}${aspect.height}${!"m"}(master)")
+                }
+            }
+        }
+
+        private fun printUpscaledWarnings() {
+            println("\r${!"2K"}${!"33;1m"} - Upscaled images:${!"m"}")
+            println("\r${!"2K"}${!"33;1m"}   - ${!"m"}Master: ${!"34;1m"}${master.dimensions.width}${!"m"}⨉${!"34;1m"}${master.dimensions.height}${!"m"}")
+
+            upscaled.forEach { image ->
+                println("\r${!"2K"}${!"33;1m"}   - ${!"m"}${image.relativeFile}: ${!"34;1m"}${image.dimensions.width}${!"m"}⨉${!"34;1m"}${image.dimensions.height}${!"m"}")
             }
         }
 
         private fun printUnscaledWarnings() {
             if(unscaled.size == 1) {
-                println("\r${!"2K"}${!"33;1m"}! - Same resolution as master:${!"m"} ${unscaled[0].relativeFile}")
+                println("\r${!"2K"}${!"33;1m"} - Same resolution as master:${!"m"} ${unscaled[0].relativeFile}")
             } else {
-                println("\r${!"2K"}${!"33;1m"}! - Same resolution as master:${!"m"}")
+                println("\r${!"2K"}${!"33;1m"} - Same resolution as master:${!"m"}")
                 unscaled.forEach { file ->
-                    println("\r${!"2K"}${!"33;1m"}!   - ${!"m"}${file.relativeFile}${!"m"}")
+                    println("\r${!"2K"}${!"33;1m"}   - ${!"m"}${file.relativeFile}${!"m"}")
                 }
             }
         }
@@ -202,9 +234,11 @@ object XCAssetMaster : CliktCommand(
                 }
             }
             val duplicates = resolutions.filterValues { it.size > 1 }
+            val upscaled = resolutions.filterKeys { it.width > master.dimensions.width || it.height > master.dimensions.height }.values.flatten()
+            val aspect = resolutions.values.flatten().filter { it.mismatchedAspectRatio }
             val unscaled = resolutions[master.dimensions] ?: mutableListOf()
-            if(unscaled.isNotEmpty() || duplicates.isNotEmpty())
-                warnings.add(Warnings(master, duplicates, unscaled))
+            if(unscaled.isNotEmpty() || upscaled.isNotEmpty() || aspect.isNotEmpty() || duplicates.isNotEmpty())
+                warnings.add(Warnings(master, duplicates, upscaled, aspect, unscaled))
         }
 
         if(warnings.isNotEmpty()) {
@@ -213,12 +247,12 @@ object XCAssetMaster : CliktCommand(
 
         masters.forEach { master ->
             if(master.assets.isEmpty()) {
-                println("\r${!"2K"}${!"31;1m"}! Unused master: ${!"m"}${master.relativeFile}${!"m"}")
+                println("\r${!"2K"}${!"33;1m"}Unused master: ${!"m"}${master.relativeFile}${!"m"}")
             }
         }
         assets.forEach { asset ->
             if(asset.master == null) {
-                println("\r${!"2K"}${!"31;1m"}! Asset missing master: ${!"m"}${asset.relativeFile}${!"m"}")
+                println("\r${!"2K"}${!"33;1m"}Asset missing master: ${!"m"}${asset.relativeFile}${!"m"}")
             }
         }
     }
@@ -264,9 +298,9 @@ object ScaleGenerator : CliktCommand(
             graphics.fillRect(0, 0, image.width, image.height)
 
             graphics.dispose()
-            print("\r$name - Writing")
+            print("\r$name - Writing       ")
             ImageIO.write(image, "png", File(filename))
-            println("\r$name - Done")
+            println("\r$name - Done        ")
         }
     }
 

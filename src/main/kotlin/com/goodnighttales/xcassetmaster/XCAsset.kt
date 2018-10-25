@@ -1,16 +1,20 @@
 package com.goodnighttales.xcassetmaster
 
 import com.goodnighttales.xcassetmaster.util.Timer
+import com.goodnighttales.xcassetmaster.util.aspectRatio
 import com.goodnighttales.xcassetmaster.util.getImageSize
 import com.goodnighttales.xcassetmaster.util.not
 import com.googlecode.pngtastic.core.PngImage
 import com.googlecode.pngtastic.core.PngOptimizer
+import java.awt.Dimension
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import javax.imageio.ImageIO
+import kotlin.math.abs
+import kotlin.math.max
 
 class XCAsset(val file: File, catalogFile: File) {
     val relativeFile = file.relativeTo(catalogFile)
@@ -31,8 +35,8 @@ class XCAsset(val file: File, catalogFile: File) {
         images.forEach { it.updateModificationDates(lastModified) }
     }
 
-    fun updateAsset(source: BufferedImage, crush: Boolean) {
-        images.forEach { it.update(source, crush) }
+    fun updateAsset(source: BufferedImage, crush: Boolean, crop: Boolean) {
+        images.forEach { it.update(source, crush, crop) }
     }
 
     inner class Image(val file: File, val relativeFile: File) {
@@ -41,6 +45,25 @@ class XCAsset(val file: File, catalogFile: File) {
         var needsUpdate = false
         var preCrush: Long = 0L
         var postCrush: Long = 0L
+        val aspectFillDimensions: Dimension
+            get() {
+                val master = master ?: return dimensions
+                val widthScale = dimensions.width.toDouble()/master.dimensions.width
+                val heightScale = dimensions.height.toDouble()/master.dimensions.height
+                val scaled = Dimension(dimensions)
+                when {
+                    widthScale > heightScale -> scaled.height = (master.dimensions.height * widthScale).toInt()
+                    heightScale > widthScale -> scaled.width = (master.dimensions.width * heightScale).toInt()
+                }
+
+                if(abs(scaled.width - dimensions.width) <= 1) scaled.width = dimensions.width
+                if(abs(scaled.height - dimensions.height) <= 1) scaled.height = dimensions.height
+                return scaled
+            }
+        val mismatchedAspectRatio: Boolean
+            get() {
+                return aspectFillDimensions != dimensions
+            }
 
         fun checkNeedsUpdate() {
             val master = master
@@ -50,18 +73,28 @@ class XCAsset(val file: File, catalogFile: File) {
             }
         }
 
-        fun update(source: BufferedImage, crush: Boolean) {
-            val time= Timer()
+        fun update(source: BufferedImage, crush: Boolean, crop: Boolean) {
+            val master = master!!
+            val time = Timer()
 
             val prefix = "\r${!"2K"}  - ${!"37;1m"}${dimensions.width}${!"m"}⨉${!"37;1m"}${dimensions.height}${!"m"} " +
                     this.name.replace(this@XCAsset.name, "") // turns `blah@2x` into `@2x`
 
             print("$prefix - Scaling ...")
 
-            val scaledInstance = source.getScaledInstance(dimensions.width, dimensions.height, java.awt.Image.SCALE_SMOOTH)
+            val drawnDimensions =
+                    if(mismatchedAspectRatio && crop) {
+                        this.aspectFillDimensions
+                    } else {
+                        this.dimensions
+                    }
+            val scaledInstance = source.getScaledInstance(drawnDimensions.width, drawnDimensions.height, java.awt.Image.SCALE_SMOOTH)
             val scaled = BufferedImage(dimensions.width, dimensions.height, BufferedImage.TYPE_INT_ARGB)
             val g = scaled.createGraphics()
-            g.drawImage(scaledInstance, 0, 0, null)
+            g.drawImage(scaledInstance,
+                    -(drawnDimensions.width-dimensions.width)/2, -(drawnDimensions.height-dimensions.height)/2,
+                    drawnDimensions.width, drawnDimensions.height,
+                    null)
             g.dispose()
 
             print("$prefix - Writing ...")

@@ -151,4 +151,6 @@ gradle-app.setting
 
 # End of https://www.gitignore.io/api/macos,kotlin,gradle,intellij+all
 
-/xcassets.png
+run/*
+!run/Assets_Blank.xcassets/
+!run/make_Assets.xcassets_blank.fish

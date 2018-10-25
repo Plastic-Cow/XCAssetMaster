@@ -27,3 +27,6 @@ fun File.getImageSize(): Dimension {
         throw IllegalArgumentException("Couldn't get dimensions of image $this")
     }
 }
+
+val Dimension.aspectRatio: Double
+    get() = (width.toDouble()/height)
