@@ -21,9 +21,9 @@ import java.nio.file.Files
 import java.util.stream.Collectors
 import javax.imageio.ImageIO
 
-fun main(args: Array<String>) = XCAssetMaster().main(args)
+fun main(args: Array<String>) = XCAssetMaster.main(args)
 
-class XCAssetMaster : CliktCommand(
+object XCAssetMaster : CliktCommand(
         name = "xcassetmaster",
         help = """
             Automatically updates images in an Xcode Asset Catalog based on a directory of masters.
@@ -38,12 +38,6 @@ class XCAssetMaster : CliktCommand(
 
         """.trimIndent()
 ) {
-    val tempFile = File.createTempFile("XCAssetMaster-", ".png")
-    val updates = mutableMapOf<File, MutableList<File>>()
-    var totalAssets = 0
-    var inputSize = 0L
-    var totalPreCrush = 0L
-    var totalPostCrush = 0L
 
     val xcAssetExtensions = mutableSetOf(
             "imageset",
@@ -62,182 +56,150 @@ class XCAssetMaster : CliktCommand(
     val additionalAssetExtensions: List<String> by option("--asset-extension", help = "Whitelist more asset extensions (default whitelist is 'imageset' and 'appiconset')").multiple()
 
     override fun run() {
-        tempFile.deleteOnExit()
         xcAssetExtensions.addAll(additionalAssetExtensions)
-        var sourceFiles = mutableMapOf<String, File>()
-        inputs.forEach { input ->
-            if (input.isFile)
-                sourceFiles[input.nameWithoutExtension] = input
-            else if (input.isDirectory)
-                sourceFiles.putAll(filesInDirectoryByName(input) { it.isFile && it.extension == "png" })
-        }
-        val exclude = this.exclude.toSet()
-        sourceFiles.filterValues { it.toPath().asSequence().none { it.toString() in exclude } }.let {
-            sourceFiles.clear()
-            sourceFiles.putAll(it)
-        }
+        val masters = getMasters().associateBy { it.name }
+        val assets = getAssets()
 
-        val assets = filesInDirectoryByName(output) {
-            it.isDirectory && it.extension in xcAssetExtensions
-        }
-
-        assets.forEach {
-            val source = sourceFiles[it.key] ?: return@forEach
-            queueImageSetUpdates(it.value, source)
-        }
-
-        val unusedMasters = sourceFiles.filterKeys { it !in assets }
-
-        val updateCount = updates.values.sumBy { it.size }
-        println("Compared $totalAssets assets against ${sourceFiles.size} master images")
-        println("Found $updateCount out-of-date images")
-        if(updateCount == 0) {
-            return
-        }
-
-        val timer = Timer()
-        updates.forEach {
-            updateImages(it.key, it.value)
-        }
-        if(unusedMasters.isNotEmpty()) {
-            println("\r${!"2K"}  ${!"33;1m"}! Unused masters:${!"m"}")
-
-            unusedMasters.forEach { file ->
-                println("\r${!"2K"}  ${!"33;1m"}! - ${file.value}${!"m"}")
+        assets.forEach { asset ->
+            val master = masters[asset.name]
+            if(master != null) {
+                asset.master = master
+                master.assets.add(asset)
             }
         }
-        println("${!"33m"}Time: ${!"33;1m"}${timer.stop()}")
 
-        if(crush) {
-            val crushSavingFraction = (totalPreCrush - totalPostCrush) / totalPreCrush.toDouble()
-            val crushSavings = String.format("%.1f", crushSavingFraction * 100)
-            println("${!"32m"}Crushed by $crushSavings% (saving ${(totalPreCrush-totalPostCrush).toReadableFileSize()})")
+        if(force) {
+            assets.forEach { it.forceNeedsUpdate() }
+        } else {
+            assets.forEach { it.checkNeedsUpdate() }
         }
+
+        val updateCount = assets.sumBy { it.images.count { it.needsUpdate } }
+        println("Compared ${assets.sumBy { it.images.size }} assets against ${masters.size} master images")
+        println("Found $updateCount out-of-date images")
+
+        if(updateCount != 0) {
+            val timer = Timer()
+
+            masters.values.forEach {
+                it.updateAssets(crush)
+                it.updateModificationDates()
+            }
+
+            println("${!"33m"}Time: ${!"33;1m"}${timer.stop()}")
+
+            if (crush) {
+                val preCrush = assets.fold(0L) { t, it -> t + it.images.fold(0L) { t, it -> t + it.preCrush } } + 1L
+                val postCrush = assets.fold(0L) { t, it -> t + it.images.fold(0L) { t, it -> t + it.postCrush } } + 1L
+                val crushSavingFraction = (preCrush - postCrush) / preCrush.toDouble()
+                val crushSavings = String.format("%.1f", crushSavingFraction * 100)
+                println("${!"32m"}Crushed by $crushSavings% (saving ${(preCrush - postCrush).toReadableFileSize()})")
+            }
+        }
+
+        printWarnings(masters.values.toList(), assets)
 
         System.exit(0) // program hangs at the end without this. All the threads are just some form of "finalizer"
     }
 
-    private fun queueImageSetUpdates(target: File, source: File) {
-        val contents = filesInDirectory(target) { it.isFile && it.extension == "png" }
-        totalAssets += contents.size
+    private fun getMasters(): List<MasterAsset> {
+        val files = mutableListOf<Pair<File, File>>()
 
-        contents.forEach {
-            val dateDifference = Math.abs(it.lastModified() - source.lastModified())
-            if(force || dateDifference > MOD_DATE_TOLERANCE) {
-                updates.getOrPut(source) { mutableListOf() }.add(it)
-            }
+        inputs.forEach { input ->
+            if (input.isFile)
+                files.add(input to input)
+            else if (input.isDirectory)
+                files.addAll(filesInDirectory(input) { it.isFile && it.extension == "png" }.map { it to input })
         }
+
+        val exclude = this.exclude.toSet()
+        files.filter { it.first.toPath().asSequence().none { it.toString() in exclude } }.let {
+            files.clear()
+            files.addAll(it)
+        }
+
+        return files.map { MasterAsset(it.first, it.second) }
     }
 
-    private fun updateImages(source: File, outputs: List<File>) {
-        val totalTime = Timer()
-        println("- ${!"32m"}${source.nameWithoutExtension}${!"m"}")
-        print("  - Reading ...")
-        val master = ImageIO.read(source)
-        val previousDimensions = mutableMapOf<Dimension, MutableList<File>>()
-        inputSize += source.length()
+    private fun getAssets(): List<XCAsset> {
+        return filesInDirectory(output) {
+            it.isDirectory && it.extension in xcAssetExtensions
+        }.map { XCAsset(it, output) }
 
-        outputs.forEach { dest ->
-            val individualTime = Timer()
-            val resolution = getImageSize(dest)
-            previousDimensions.getOrPut(resolution) { mutableListOf() }.add(dest)
+    }
 
-            val newName = dest.nameWithoutExtension.replace(source.nameWithoutExtension, "")
-            val prefix = "\r${!"2K"}  - ${!"37;1m"}${resolution.width}${!"m"}⨉${!"37;1m"}${resolution.height}${!"m"} $newName"
+    private fun filesInDirectory(dir: File, test: (file: File) -> Boolean = { true }): List<File> {
+        return Files.walk(dir.toPath()).collect(Collectors.toList()).map { it.toFile() }.filter(test)
+    }
 
-            print("$prefix - Scaling ...")
+    class Warnings(
+            val master: MasterAsset,
+            val duplicates: Map<Dimension, List<XCAsset.Image>>,
+            val unscaled: List<XCAsset.Image>
+    ) {
+        fun printWarnings() {
+                printMasterHeader()
+            if(duplicates.isNotEmpty()) printDuplicateWarnings()
+            if(unscaled.isNotEmpty()) printUnscaledWarnings()
+        }
 
-            val scaledInstance = master.getScaledInstance(resolution.width, resolution.height, Image.SCALE_SMOOTH)
-            val scaled = BufferedImage(resolution.width, resolution.height, BufferedImage.TYPE_INT_ARGB)
-            val g = scaled.createGraphics()
-            g.drawImage(scaledInstance, 0, 0, null)
-            g.dispose()
+        private fun printMasterHeader() {
+            println("\r${!"2K"}${!"33;1m"}! ${master.relativeFile}:${!"m"}")
+        }
 
-            print("$prefix - Writing ...")
-            val out = if (crush) tempFile.outputStream() else dest.outputStream()
-            ImageIO.write(scaled, "png", out)
+        private fun printDuplicateWarnings() {
+            println("\r${!"2K"}${!"33;1m"}! - Duplicate resolutions:${!"m"}")
 
-            val preCrush = tempFile.length()
-            totalPreCrush += preCrush
-            if (crush) {
-                print("$prefix - Optimizing ...")
-                optimize(FileInputStream(tempFile), dest)
+            duplicates.forEach { (res, images) ->
+                println("\r${!"2K"}${!"33;1m"}!   - ${!"m"}${res.width}⨉${res.height}${!"m"}")
+
+                images.forEach { image ->
+                    println("\r${!"2K"}${!"33;1m"}!     - ${!"m"}${image.relativeFile}${!"m"}")
+                }
             }
-            val postCrush = dest.length()
-            totalPostCrush += postCrush
+        }
 
-            val crushString = if(crush) {
-                " (${!"36m"}${String.format("%.1f", ((preCrush-postCrush)/preCrush.toDouble())*100)}%${!"m"} crushed)"
+        private fun printUnscaledWarnings() {
+            if(unscaled.size == 1) {
+                println("\r${!"2K"}${!"33;1m"}! - Same resolution as master:${!"m"} ${unscaled[0].relativeFile}")
             } else {
-                ""
-            }
-            dest.setLastModified(source.lastModified())
-            println("$prefix - Completed in ${!"33;1m"}${individualTime.stop()}${!"m"}$crushString")
-        }
-
-        println("\r${!"2K"}  - Time: ${!"33;1m"}${totalTime.stop()}${!"m"}")
-
-        val duplicates =  previousDimensions.filter { it.value.size > 1 }
-        if(duplicates.isNotEmpty()) {
-            println("\r${!"2K"}  ${!"31;1m"}! Duplicate resolutions:${!"m"}")
-
-            duplicates.forEach { (res, files) ->
-                println("\r${!"2K"}  ${!"31;1m"}! - ${res.width}${!"m"}⨉${!"31;1m"}${res.height}${!"m"}")
-
-                files.forEach { file ->
-                    println("\r${!"2K"}  ${!"31;1m"}!   - Path: ${!"31m"}${file.relativeTo(this.output)}${!"m"}")
+                println("\r${!"2K"}${!"33;1m"}! - Same resolution as master:${!"m"}")
+                unscaled.forEach { file ->
+                    println("\r${!"2K"}${!"33;1m"}!   - ${!"m"}${file.relativeFile}${!"m"}")
                 }
-            }
-        }
-
-        val unscaled = previousDimensions[Dimension(master.width, master.height)]
-        if(unscaled != null) {
-            println("\r${!"2K"}  ${!"33;1m"}! Master-resolution assets in bundle:${!"m"}")
-
-            unscaled.forEach { file ->
-                println("\r${!"2K"}  ${!"33;1m"}! - ${file.name}${!"m"}")
             }
         }
     }
 
-    private fun optimize(inputStream: InputStream, file: File) {
-        // load png image from a file
-        val image = PngImage(inputStream)
+    private fun printWarnings(masters: List<MasterAsset>, assets: List<XCAsset>) {
 
-        // optimize
-        val optimizer = PngOptimizer()
-        val optimizedImage = optimizer.optimize(image)
+        val warnings = mutableListOf<Warnings>()
+        masters.forEach { master ->
+            val resolutions = mutableMapOf<Dimension, MutableList<XCAsset.Image>>()
 
-        // export the optimized image to a new file
-        val optimizedBytes = ByteArrayOutputStream()
-        optimizedImage.writeDataOutputStream(optimizedBytes)
-        optimizedImage.export(file.absolutePath, optimizedBytes.toByteArray())
-    }
-
-    companion object {
-        const val MOD_DATE_TOLERANCE = 2000
-
-        private fun filesInDirectoryByName(dir: File, test: (file: File) -> Boolean): Map<String, File> {
-            return filesInDirectory(dir, test).associateBy { it.nameWithoutExtension }
-        }
-
-        private fun filesInDirectory(dir: File, test: (file: File) -> Boolean = { true }): List<File> {
-            return Files.walk(dir.toPath()).collect(Collectors.toList()).map { it.toFile() }.filter(test)
-        }
-
-        private fun getImageSize(file: File): Dimension {
-            ImageIO.createImageInputStream(file).use { input ->
-                val readers = ImageIO.getImageReaders(input)
-                if (readers.hasNext()) {
-                    val reader = readers.next()
-                    try {
-                        reader.input = input
-                        return Dimension(reader.getWidth(0), reader.getHeight(0))
-                    } finally {
-                        reader.dispose()
-                    }
+            master.assets.forEach { asset ->
+                asset.images.forEach { image ->
+                    resolutions.getOrPut(image.dimensions) { mutableListOf() }.add(image)
                 }
-                throw IllegalArgumentException("Couldn't get dimensions of image $file")
+            }
+            val duplicates = resolutions.filterValues { it.size > 1 }
+            val unscaled = resolutions[master.dimensions] ?: mutableListOf()
+            if(unscaled.isNotEmpty() || duplicates.isNotEmpty())
+                warnings.add(Warnings(master, duplicates, unscaled))
+        }
+
+        if(warnings.isNotEmpty()) {
+            warnings.forEach { it.printWarnings() }
+        }
+
+        masters.forEach { master ->
+            if(master.assets.isEmpty()) {
+                println("\r${!"2K"}${!"31;1m"}! Unused master: ${!"m"}${master.relativeFile}${!"m"}")
+            }
+        }
+        assets.forEach { asset ->
+            if(asset.master == null) {
+                println("\r${!"2K"}${!"31;1m"}! Asset missing master: ${!"m"}${asset.relativeFile}${!"m"}")
             }
         }
     }
