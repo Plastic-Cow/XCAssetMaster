@@ -1,18 +1,20 @@
 package com.goodnighttales.xcassetmaster
 
 import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.arguments.convert
 import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.arguments.validate
-import com.github.ajalt.clikt.parameters.options.flag
-import com.github.ajalt.clikt.parameters.options.multiple
-import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.file
+import com.github.ajalt.clikt.parameters.types.int
 import com.goodnighttales.xcassetmaster.util.Timer
 import com.goodnighttales.xcassetmaster.util.not
 import com.goodnighttales.xcassetmaster.util.toReadableFileSize
 import com.googlecode.pngtastic.core.PngImage
 import com.googlecode.pngtastic.core.PngOptimizer
+import java.awt.Color
 import java.awt.Dimension
 import java.awt.Image
 import java.awt.image.BufferedImage
@@ -20,11 +22,29 @@ import java.io.*
 import java.nio.file.Files
 import java.util.stream.Collectors
 import javax.imageio.ImageIO
+import java.awt.Graphics2D
 
-fun main(args: Array<String>) = XCAssetMaster.main(args)
+
+
+fun main(args: Array<String>) = MainCommand.main(args)
+
+object MainCommand : CliktCommand(
+        name = "xcassetmaster",
+        help = """
+            Easily manage Xcode Asset Catalogs and update them based on a set of master images.
+        """.trimIndent()
+) {
+    init {
+        subcommands(XCAssetMaster, ScaleGenerator)
+    }
+    override fun run() {
+        // nop
+    }
+
+}
 
 object XCAssetMaster : CliktCommand(
-        name = "xcassetmaster",
+        name = "update",
         help = """
             Automatically updates images in an Xcode Asset Catalog based on a directory of masters.
             In essence this script simply substitutes rescaled master pixel data into existing PNG files.
@@ -34,8 +54,7 @@ object XCAssetMaster : CliktCommand(
             named .png file to use as a master. Once it finds an asset's master file it rescales the master to match
             each png file in the asset and replaces them in-place. This process is optimized by copying the modification
             date of the master onto the rescaled images and only updating images whose modification dates don't match
-            their masters'.
-
+            their master's.
         """.trimIndent()
 ) {
 
@@ -205,3 +224,50 @@ object XCAssetMaster : CliktCommand(
     }
 }
 
+object ScaleGenerator : CliktCommand(
+        name = "generate",
+        help = """
+            Generates empty white images at various scales and writes them to the working directory.
+        """.trimIndent()
+) {
+
+    val name: String by argument("name", "The base name for the image. This name will have the scale and extension " +
+            "added and will be put in the current working directory")
+    val size: Pair<Int, Int> by argument("size", "The size of the 1x scale in the format ###x###").convert {
+        val components = it.split("x")
+        if(components.size != 2) {
+            fail("Invalid number of size components ${components.size}. Ensure the argument is in the format ###x###")
+        }
+        val (width, height) = components.map { it.toInt() }
+        return@convert width to height
+    }
+    val scales: List<Int> by option("-s", "--scale", help = "Generate an additional image at N x the base size. " +
+            "The file will be given an @Nx at the end of its name. Default scales are @2x and @3x")
+            .int().multiple(listOf(2, 3))
+    val color: Color by option("-c", "--color", help = "Specify the background color of the image in AARRGGBB hex. " +
+            "If no alpha is provided the color will be opaque. Default is FFFFFF").convert {
+        Color(Integer.parseUnsignedInt(it, 16))
+    }.default(Color.WHITE)
+
+    override fun run() {
+        for(scale in scales.toSet() + setOf(1)) {
+            val filename =
+                    if(scale == 1)
+                        "$name.png"
+                    else
+                        "$name@${scale}x.png"
+            print("$name - Generating")
+            val image = BufferedImage(size.first * scale, size.second * scale, BufferedImage.TYPE_INT_ARGB)
+            val graphics = image.createGraphics()
+
+            graphics.paint = color
+            graphics.fillRect(0, 0, image.width, image.height)
+
+            graphics.dispose()
+            print("\r$name - Writing")
+            ImageIO.write(image, "png", File(filename))
+            println("\r$name - Done")
+        }
+    }
+
+}
